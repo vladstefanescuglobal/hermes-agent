@@ -933,6 +933,82 @@ class TestSSHConfigWriteGate:
         assert "BLOCKED" in (_check_approval_required_write(["sshdir/config"], "ssh-gate-task") or "")
 
 
+class TestProfileFileWriteApproval:
+    def test_file_writes_approval_is_disabled_by_default(self):
+        from hermes_cli.config_defaults import DEFAULT_CONFIG
+
+        assert DEFAULT_CONFIG["security"]["approval"]["file_writes"] is False
+
+    def test_enabled_policy_blocks_file_tool_write_when_approval_is_denied(self, tmp_path, monkeypatch):
+        from hermes_cli import config
+        from tools import approval
+        from tools.file_tools import write_file_tool
+
+        monkeypatch.setattr(config, "load_config", lambda: {
+            "security": {"approval": {"file_writes": True}},
+        })
+        monkeypatch.setattr(approval, "_run_approval_gate", lambda **kwargs: {
+            "approved": False,
+            "message": "BLOCKED: approval denied.",
+        })
+        target = tmp_path / "ordinary.txt"
+
+        result = json.loads(write_file_tool(str(target), "must not be written"))
+
+        assert "BLOCKED" in result["error"]
+        assert not target.exists()
+
+    def test_enabled_policy_blocks_file_tool_write_without_a_human(self, tmp_path, monkeypatch):
+        from copy import deepcopy
+
+        from hermes_cli import config
+        from hermes_cli.config_defaults import DEFAULT_CONFIG
+        from tools.file_tools import write_file_tool
+
+        configured = deepcopy(DEFAULT_CONFIG)
+        configured["security"]["approval"]["file_writes"] = True
+        monkeypatch.setattr(config, "load_config", lambda: configured)
+        monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        target = tmp_path / "ordinary.txt"
+
+        result = json.loads(write_file_tool(str(target), "must not be written"))
+
+        assert "BLOCKED" in result["error"]
+        assert not target.exists()
+
+    def test_configuration_error_blocks_file_tool_write(self, tmp_path, monkeypatch):
+        from hermes_cli import config
+        from tools.file_tools import write_file_tool
+
+        def unavailable_config():
+            raise RuntimeError("configuration unavailable")
+
+        monkeypatch.setattr(config, "load_config", unavailable_config)
+        target = tmp_path / "ordinary.txt"
+
+        result = json.loads(write_file_tool(str(target), "must not be written"))
+
+        assert "BLOCKED" in result["error"]
+        assert "policy could not be checked" in result["error"]
+        assert not target.exists()
+
+    def test_invalid_configuration_blocks_file_tool_write(self, tmp_path, monkeypatch):
+        from hermes_cli import config
+        from tools.file_tools import write_file_tool
+
+        monkeypatch.setattr(config, "load_config", lambda: {
+            "security": {"approval": {"file_writes": "true"}},
+        })
+        target = tmp_path / "ordinary.txt"
+
+        result = json.loads(write_file_tool(str(target), "must not be written"))
+
+        assert "BLOCKED" in result["error"]
+        assert "policy is invalid" in result["error"]
+        assert not target.exists()
+
+
 class TestSecretFileReadRedaction:
     """#110567: read_file / search_files must classify the RESOLVED path and run the
     assignment passes for a secret-bearing file, instead of returning an opaque

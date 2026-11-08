@@ -11,6 +11,7 @@ whole-file overwrite of content this task never saw or that changed since.
 """
 
 import fnmatch
+import logging
 import os
 from pathlib import Path
 
@@ -26,6 +27,8 @@ from tools.file_tools_paths import (
     _expand_tilde, _resolve_path_for_task, _ssh_path_escapes_home, _terminal_env_type_for_task)
 from tools.file_tools_read_tracking import _has_full_write_baseline, _is_own_blind_patch, _read_mtime_drifted
 import itertools
+
+logger = logging.getLogger(__name__)
 
 # Prefixes matched after realpath. macOS: /private/var mirrors /var — block the
 # sensitive subtrees only; a blanket "/private/var/" refuses every temp-file
@@ -357,9 +360,46 @@ def _check_protected_instruction_write(paths: list[str], task_id: str = "default
 
 
 def _check_approval_required_write(paths: list[str], task_id: str = "default") -> str | None:
-    """Gate a write/patch touching an approval-required path (``~/.ssh/config`` can steer
-    execution via ``ProxyCommand``). Routine gate: once/session/always, honors --yolo,
-    fail-closed without an interactive/gateway channel."""
+    """Gate writes to approval-required paths and profiles that require approval for all writes."""
+    try:
+        from hermes_cli.config import cfg_get, load_config
+        file_writes_enabled = cfg_get(load_config(), "security", "approval", "file_writes", default=False)
+    except Exception:
+        logger.exception("File-write approval policy could not be checked")
+        return "BLOCKED: file-write approval policy could not be checked. The file was not modified."
+
+    if not isinstance(file_writes_enabled, bool):
+        return "BLOCKED: file-write approval policy is invalid. The file was not modified."
+
+    if file_writes_enabled is True:
+        targets = ", ".join(dict.fromkeys(paths))
+        description = (
+            f"Write or patch file(s): {targets}. "
+            "File-write approval is enabled in this profile, so each operation uses the normal approval gate.")
+        blocked = (
+            f"BLOCKED: file write approval for ({targets}) "
+            "{why} The file was not modified.")
+        try:
+            import tools.approval as _approval
+            result = _approval._run_approval_gate(
+                pattern_key="file_write",
+                description=description,
+                display_target=f"<write to {targets}>",
+                cron_deny_message=blocked.format(why="requires approval but this cron session denies it."),
+                single_query_deny_message=blocked.format(
+                    why="requires approval but single-query mode has no user present."),
+                unattended_deny_message=blocked.format(
+                    why="requires approval but no interactive user or gateway is present."),
+                autoapprove_log_prefix="file_write",
+                fail_closed_when_no_human=True,
+                no_human_block_message=blocked.format(
+                    why="requires approval but no interactive user or gateway is present."))
+        except Exception:
+            logger.exception("File-write approval subsystem is unavailable")
+            return blocked.format(why="the approval subsystem is unavailable.")
+        if not result.get("approved"):
+            return result.get("message") or blocked.format(why="was denied.")
+
     try:
         from agent.file_safety import is_write_approval_required
     except Exception:
