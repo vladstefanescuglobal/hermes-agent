@@ -1448,7 +1448,9 @@ def build_prepared_desktop(desktop_dir: Path, *, source_mode: bool, npm: str, en
         # builds run later, often with every system git removed from PATH; the
         # desktop stamp must still resolve this checkout's real HEAD.
         import pm
-        build_env = pm.ensure("git", base_env=build_env).env
+        import shutil
+        if not shutil.which("git", path=build_env.get("PATH", "")):
+            build_env = pm.ensure("git", base_env=build_env).env
     if _force_adhoc_macos_signing(build_env, source_mode=source_mode):
         print("  → No Developer ID configured; ad-hoc signing this local rebuild "
               "(CSC_IDENTITY_AUTO_DISCOVERY=false)")
